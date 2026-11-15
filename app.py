@@ -8,6 +8,7 @@ import os
 import pandas as pd
 import streamlit as st
 
+import ui_style
 from seo_super_star.config import Settings, service_status
 from seo_super_star import search_performance
 from seo_super_star.brief import brief_to_markdown
@@ -35,21 +36,23 @@ except Exception:
 
 def sidebar_settings() -> Settings:
     with st.sidebar:
-        st.header("Optional keys")
-        st.caption("Everything works without keys. Keys entered here last for "
-                   "this browser session only and are not saved.")
+        st.header("🚦 What's switched on")
+        st.caption("Green = full power. Orange = working in free fallback mode.")
+        status_box = st.container()
         labels = {"tavily_api_key": "Tavily key (live search, AI answers)",
                   "gemini_api_key": "Gemini key (AI writing, AI answers)",
                   "groq_api_key": "Groq key (AI writing fallback)",
                   "openrouter_api_key": "OpenRouter key (AI writing fallback)",
                   "pagespeed_api_key": "PageSpeed Insights key",
                   "jina_api_key": "Reader key (JS rendering)"}
-        settings = Settings.from_env({name: st.text_input(label, type="password")
-                                      for name, label in labels.items()})
-        st.header("System & quota status")
-        for item in service_status(settings):
-            st.markdown(f"**{item['service']}**: {item['mode']}")
-            st.caption(item["detail"])
+        with st.expander("🔑 Add optional keys"):
+            st.caption("Everything works without keys. Keys entered here last for "
+                       "this browser session only and are not saved.")
+            settings = Settings.from_env({name: st.text_input(label, type="password")
+                                          for name, label in labels.items()})
+        with status_box:
+            for item in service_status(settings):
+                ui_style.status_card(item["service"], item["mode"], item["detail"])
     return settings
 
 
@@ -119,7 +122,10 @@ def show_pagespeed(speed: dict) -> None:
 
 
 def tab_technical(settings: Settings) -> None:
-    st.subheader("Technical SEO audit")
+    st.subheader("🔍 Technical SEO audit")
+    ui_style.intro("Is this page healthy?",
+                   "Paste any page address. You get a list of problems to fix, ordered by "
+                   "how serious they are.")
     audit_form("technical", settings)
     report = current_report()
     if not report:
@@ -140,9 +146,12 @@ def tab_technical(settings: Settings) -> None:
 
     st.subheader("Issues")
     if report["issues"]:
-        st.dataframe(pd.DataFrame(report["issues"]), hide_index=True)
+        issues = pd.DataFrame(report["issues"])
+        issues["severity"] = issues["severity"].map(
+            lambda level: ui_style.SEVERITY_ICONS.get(level, level))
+        st.dataframe(issues, hide_index=True)
     else:
-        st.success("No issues found.")
+        st.success("🎉 No issues found.")
 
     st.subheader("Metadata and directives")
     show_length_check("Title tag", page["title"])
@@ -213,13 +222,17 @@ def tab_technical(settings: Settings) -> None:
 
 
 def tab_geo(settings: Settings) -> None:
-    st.subheader("GEO / AEO readiness and grounded JSON-LD")
+    st.subheader("🤖 GEO / AEO readiness and grounded JSON-LD")
+    ui_style.intro("Will AI assistants quote this page?",
+                   "Scores how easy the page is for AI answers to understand and cite, and "
+                   "writes the structured-data code for you to paste into the page.")
     audit_form("geo", settings)
     report = current_report()
     if not report:
         return
     geo = report["geo"]
-    st.metric("GEO / AEO readiness", f"{geo['score']}/100", geo["grade"],
+    st.metric("GEO / AEO readiness",
+              f"{ui_style.score_badge(geo['score'])} {geo['score']}/100", geo["grade"],
               delta_color="off")
     for pillar in geo["pillars"]:
         st.markdown(f"**{pillar['name']}: {pillar['score']}/{pillar['max']}**")
@@ -244,7 +257,10 @@ def tab_geo(settings: Settings) -> None:
 
 
 def tab_keywords(settings: Settings) -> None:
-    st.subheader("Keyword discovery and opportunity scoring")
+    st.subheader("💡 Keyword discovery and opportunity scoring")
+    ui_style.intro("What are people searching for?",
+                   "Type one topic. You get the related searches people really type, sorted "
+                   "by how worthwhile each one is to target.")
     with st.form("keyword_form"):
         seed = st.text_input("Seed keyword", placeholder="standing desk")
         left, right = st.columns(2)
@@ -294,7 +310,10 @@ def tab_keywords(settings: Settings) -> None:
 
 
 def tab_serp(settings: Settings) -> None:
-    st.subheader("Competitor gap and content brief")
+    st.subheader("🏆 Competitor gap and content brief")
+    ui_style.intro("What do the top-ranking pages do that yours doesn't?",
+                   "Type a keyword. The app reads the pages that rank for it and writes an "
+                   "outline for a page that can compete.")
     with st.form("serp_form"):
         keyword = st.text_input("Target keyword", placeholder="best standing desk")
         left, middle, right = st.columns([3, 1, 1])
@@ -375,7 +394,11 @@ def tab_serp(settings: Settings) -> None:
 
 
 def citation_monitor(settings: Settings) -> None:
-    st.subheader("AI citation visibility monitor")
+    st.divider()
+    st.subheader("📣 AI citation visibility monitor")
+    ui_style.intro("Do AI answers mention your brand?",
+                   "List the questions a buyer would ask. The app checks whether your brand "
+                   "or website shows up in the answers, and who shows up instead.")
     with st.form("citation_form"):
         left, right = st.columns(2)
         brand = left.text_input("Brand name")
@@ -416,7 +439,9 @@ def citation_monitor(settings: Settings) -> None:
 
 def sitemap_batch(settings: Settings) -> None:
     st.divider()
-    st.subheader("Sitemap batch audit")
+    st.subheader("🗺️ Sitemap batch audit")
+    ui_style.intro("Check many pages at once.",
+                   "Paste a sitemap or website address to audit up to 100 pages in one go.")
     with st.form("sitemap_form"):
         left, right = st.columns([4, 1])
         sitemap_url = left.text_input("Sitemap or site URL",
@@ -455,7 +480,10 @@ def sitemap_batch(settings: Settings) -> None:
 
 
 def tab_search_performance(settings: Settings) -> None:
-    st.subheader("Search performance opportunity miner")
+    st.subheader("📈 Search performance opportunity miner")
+    ui_style.intro("Where are the quick wins?",
+                   "Finds searches where you already rank on page one or two and a small "
+                   "improvement would bring more clicks.")
     source = st.radio("Data source", ["Demo dataset", "Upload CSV", "Live Search Console"],
                       horizontal=True)
     rows: list[dict] = []
@@ -536,7 +564,10 @@ def tab_experiments(settings: Settings) -> None:
                            + f". [Open the sheet]({synced['sheet_url']})")
             else:
                 st.error(synced["error"])
-    st.subheader("Experiment tracker")
+    st.subheader("🧪 Experiment tracker")
+    ui_style.intro("Did the change work?",
+                   "Write down each change you make to a page, then record the ranking "
+                   "later to see whether it helped.")
     with st.expander("Log a new experiment", expanded=not store.list_experiments(limit=1)):
         with st.form("experiment_form", clear_on_submit=True):
             url = st.text_input("Page URL")
@@ -577,7 +608,7 @@ def tab_experiments(settings: Settings) -> None:
         st.download_button("Download experiments (CSV)", frame.to_csv(index=False),
                            file_name="seo_experiments.csv", mime="text/csv")
 
-    st.subheader("Audit history")
+    st.subheader("🗂️ Audit history")
     audits = store.list_audits()
     if audits:
         frame = pd.DataFrame(audits)
@@ -587,7 +618,7 @@ def tab_experiments(settings: Settings) -> None:
     else:
         st.info("No audits saved yet.")
 
-    st.subheader("Keyword history")
+    st.subheader("🔖 Keyword history")
     keywords = store.list_keywords()
     if keywords:
         frame = pd.DataFrame(keywords)
@@ -602,10 +633,12 @@ def tab_experiments(settings: Settings) -> None:
 
 
 def main() -> None:
-    st.title("⭐ SEO Super Star")
+    ui_style.apply()
+    ui_style.hero()
     settings = sidebar_settings()
-    tabs = st.tabs(["1 Technical audit", "2 Keywords", "3 SERP & briefs",
-                    "4 GEO & schema", "5 Search performance", "6 History & experiments"])
+    tabs = st.tabs(["🔍 1 Technical audit", "💡 2 Keywords", "🏆 3 SERP & briefs",
+                    "🤖 4 GEO & schema", "📈 5 Search performance",
+                    "🧪 6 History & experiments"])
     with tabs[0]:
         tab_technical(settings)
         sitemap_batch(settings)
