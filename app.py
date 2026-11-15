@@ -9,9 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from seo_super_star.config import Settings, service_status
+from seo_super_star import search_performance
+from seo_super_star.keywords import discover_keywords_and_trends
 from seo_super_star.schema_gen import SCHEMA_TYPES
-from seo_super_star.service import inspect_url_seo_and_geo
-from seo_super_star.storage import Storage, summary_row
+from seo_super_star.service import inspect_url_seo_and_geo, log_seo_optimization_experiment
+from seo_super_star.storage import EXPERIMENT_STATUSES, Storage, summary_row
 
 st.set_page_config(page_title="SEO Super Star", page_icon="⭐", layout="wide")
 
@@ -231,16 +233,161 @@ def tab_geo(settings: Settings) -> None:
     coming(3, "The AI citation visibility monitor")
 
 
-def tab_history(settings: Settings) -> None:
-    st.subheader("Audit history")
-    rows = Storage(settings.db_path).list_audits()
-    if not rows:
-        st.info("No audits saved yet.")
+def tab_keywords(settings: Settings) -> None:
+    st.subheader("Keyword discovery and opportunity scoring")
+    with st.form("keyword_form"):
+        seed = st.text_input("Seed keyword", placeholder="standing desk")
+        left, right = st.columns(2)
+        country = left.text_input("Country code", value="us", max_chars=2)
+        language = right.text_input("Language code", value="en", max_chars=5)
+        questions = st.checkbox("Add question and commercial modifiers "
+                                "(how to, what is, best, vs, price of...)", value=True)
+        alphabet = st.checkbox("Add a-z suffixes (26 more lookups)")
+        trends = st.checkbox("Look up trend momentum for the top keywords", value=True)
+        submitted = st.form_submit_button("Find keywords", type="primary")
+    if submitted:
+        with st.spinner("Collecting suggestions..."):
+            st.session_state["keywords"] = discover_keywords_and_trends(
+                seed, country_code=country, include_questions=questions,
+                include_alphabet=alphabet, language=language,
+                include_trends=trends, settings=settings)
+    result = st.session_state.get("keywords")
+    if not result:
+        st.info("Enter a seed keyword to discover related searches.")
         return
-    frame = pd.DataFrame(rows)
-    st.dataframe(frame, hide_index=True)
-    st.download_button("Download history (CSV)", frame.to_csv(index=False),
-                       file_name="audit_history.csv", mime="text/csv")
+    if not result["ok"]:
+        st.error(result["error"])
+        return
+
+    frame = pd.DataFrame(result["keywords"])[
+        ["keyword", "intent", "opportunity_score", "trend_interest",
+         "trend_direction", "source_count", "sources"]]
+    cols = st.columns(4)
+    cols[0].metric("Keywords", len(frame))
+    for col, intent in zip(cols[1:], ("Transactional", "Commercial", "Informational")):
+        col.metric(intent, int((frame["intent"] == intent).sum()))
+    st.caption(f"Source: {', '.join(result['providers'])} | "
+               f"{result['queries_run']} lookups | {result['trend_status']}")
+    chosen = st.multiselect("Show intents", ["Transactional", "Commercial", "Informational"],
+                            default=["Transactional", "Commercial", "Informational"])
+    shown = frame[frame["intent"].isin(chosen)]
+    st.dataframe(shown, hide_index=True)
+    st.download_button("Download keywords (CSV)", shown.to_csv(index=False),
+                       file_name=f"keywords_{result['seed_keyword'].replace(' ', '_')}.csv",
+                       mime="text/csv")
+    st.caption("The Opportunity Score ranks keywords by intent, how prominently "
+               "autocomplete suggests them, how specific they are, and trend "
+               "momentum. It is a prioritisation guide, not search volume. "
+               "Trend interest is the last four weeks as a percentage of the "
+               "keyword's own 12-month peak; it is looked up for the seed and "
+               "the top-ranked keywords only.")
+
+
+def tab_search_performance() -> None:
+    st.subheader("Search performance opportunity miner")
+    source = st.radio("Data source", ["Demo dataset", "Upload CSV"], horizontal=True)
+    rows: list[dict] = []
+    if source == "Upload CSV":
+        st.caption("Export the Queries or Pages table from your search console's "
+                   "Performance report. Needed columns: query or page, impressions, "
+                   "position; clicks and CTR are used when present.")
+        upload = st.file_uploader("Search performance CSV", type=["csv", "tsv", "txt"])
+        if upload is None:
+            st.info("Drop a CSV here, or switch to the demo dataset.")
+            return
+        parsed = search_performance.parse_csv(upload.getvalue())
+        if parsed["error"]:
+            st.error(parsed["error"])
+            return
+        rows = parsed["rows"]
+    else:
+        rows = search_performance.demo_rows()
+        st.caption("Showing built-in sample data for a fictional shop.")
+
+    min_impressions = st.number_input(
+        "Minimum impressions to act on", min_value=0, value=50, step=10,
+        help="Rows below this are set aside as Monitor, except clear Top Winners.")
+    mined = search_performance.mine_opportunities(rows, int(min_impressions))
+    cols = st.columns(len(search_performance.BUCKETS))
+    for col, bucket in zip(cols, search_performance.BUCKETS):
+        col.metric(bucket, mined["summary"][bucket])
+
+    bucket = st.selectbox("Bucket", ["All"] + search_performance.BUCKETS)
+    frame = pd.DataFrame(mined["rows"])
+    if bucket != "All":
+        frame = frame[frame["bucket"] == bucket]
+        st.info(search_performance.RECOMMENDATIONS[bucket])
+    st.dataframe(frame[["bucket", "query", "page", "position", "ctr", "clicks",
+                        "impressions", "potential_clicks", "recommendation"]],
+                 hide_index=True)
+    st.download_button("Download opportunities (CSV)", frame.to_csv(index=False),
+                       file_name="search_opportunities.csv", mime="text/csv")
+    st.caption("Potential clicks is a rough estimate from typical click shares by "
+               "position. A direct connection to live search data arrives in phase 4.")
+
+
+def tab_experiments(settings: Settings) -> None:
+    store = Storage(settings.db_path)
+    st.subheader("Experiment tracker")
+    with st.expander("Log a new experiment", expanded=not store.list_experiments(limit=1)):
+        with st.form("experiment_form", clear_on_submit=True):
+            url = st.text_input("Page URL")
+            keyword = st.text_input("Target keyword")
+            hypothesis = st.text_area("Hypothesis", height=70,
+                                      placeholder="Adding an FAQ block will lift CTR.")
+            changes = st.text_area("Changes made", height=70)
+            left, right = st.columns(2)
+            position = left.number_input("Baseline position", min_value=0.0, value=None, step=0.1)
+            ctr = right.number_input("Baseline CTR (%)", min_value=0.0, max_value=100.0,
+                                     value=None, step=0.1)
+            if st.form_submit_button("Log experiment", type="primary"):
+                outcome = log_seo_optimization_experiment(
+                    url, keyword, hypothesis, changes, position, ctr, settings=settings)
+                if outcome["ok"]:
+                    st.success(f"Experiment {outcome['experiment_id']} logged.")
+                else:
+                    st.error(outcome["error"])
+
+    experiments = store.list_experiments()
+    if not experiments:
+        st.info("No experiments logged yet.")
+    else:
+        frame = pd.DataFrame(experiments)
+        st.dataframe(frame, hide_index=True)
+        st.caption("position_gain is positive when the page moved up.")
+        with st.form("experiment_update"):
+            st.markdown("**Record current results**")
+            cols = st.columns(4)
+            chosen = cols[0].selectbox("Experiment", [e["id"] for e in experiments])
+            position = cols[1].number_input("Current position", min_value=0.0, value=None, step=0.1)
+            ctr = cols[2].number_input("Current CTR (%)", min_value=0.0, max_value=100.0,
+                                       value=None, step=0.1)
+            status = cols[3].selectbox("Status", EXPERIMENT_STATUSES)
+            if st.form_submit_button("Save results"):
+                store.update_experiment(chosen, position, ctr, status)
+                st.rerun()
+        st.download_button("Download experiments (CSV)", frame.to_csv(index=False),
+                           file_name="seo_experiments.csv", mime="text/csv")
+
+    st.subheader("Audit history")
+    audits = store.list_audits()
+    if audits:
+        frame = pd.DataFrame(audits)
+        st.dataframe(frame, hide_index=True)
+        st.download_button("Download audit history (CSV)", frame.to_csv(index=False),
+                           file_name="audit_history.csv", mime="text/csv")
+    else:
+        st.info("No audits saved yet.")
+
+    st.subheader("Keyword history")
+    keywords = store.list_keywords()
+    if keywords:
+        frame = pd.DataFrame(keywords)
+        st.dataframe(frame, hide_index=True)
+        st.download_button("Download keyword history (CSV)", frame.to_csv(index=False),
+                           file_name="keyword_history.csv", mime="text/csv")
+    else:
+        st.info("No keyword runs saved yet.")
     st.caption("History is stored in a local file for now. On the free host it "
                "resets when the app restarts, until the cloud database is added.")
 
@@ -257,16 +404,15 @@ def main() -> None:
     with tabs[0]:
         tab_technical(settings)
     with tabs[1]:
-        coming(2, "Keyword expansion and trend scoring")
+        tab_keywords(settings)
     with tabs[2]:
         coming(3, "Competitor gap analysis and content briefs")
     with tabs[3]:
         tab_geo(settings)
     with tabs[4]:
-        coming(2, "The search performance opportunity miner")
+        tab_search_performance()
     with tabs[5]:
-        tab_history(settings)
-        coming(2, "The experiment tracker")
+        tab_experiments(settings)
 
 
 main()

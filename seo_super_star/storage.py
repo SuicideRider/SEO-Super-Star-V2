@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from contextlib import closing
+from datetime import datetime, timezone
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS url_audits (
@@ -34,7 +35,51 @@ CREATE TABLE IF NOT EXISTS url_audits (
     inp_ms INTEGER,
     report_json TEXT
 );
+CREATE TABLE IF NOT EXISTS keyword_clusters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    seed_keyword TEXT NOT NULL,
+    country_code TEXT,
+    language TEXT,
+    keyword TEXT NOT NULL,
+    intent TEXT,
+    trend_interest INTEGER,
+    trend_direction TEXT,
+    opportunity_score INTEGER
+);
+CREATE TABLE IF NOT EXISTS seo_experiments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    url TEXT NOT NULL,
+    target_keyword TEXT,
+    hypothesis TEXT,
+    changes_made TEXT,
+    baseline_position REAL,
+    baseline_ctr REAL,
+    current_position REAL,
+    current_ctr REAL,
+    status TEXT NOT NULL
+);
 """
+
+EXPERIMENT_STATUSES = ["Running", "Won", "Lost", "Inconclusive"]
+KEYWORD_COLUMNS = ["created_at", "seed_keyword", "country_code", "language", "keyword",
+                   "intent", "trend_interest", "trend_direction", "opportunity_score"]
+EXPERIMENT_COLUMNS = ["id", "created_at", "updated_at", "url", "target_keyword",
+                      "hypothesis", "changes_made", "baseline_position", "baseline_ctr",
+                      "current_position", "current_ctr", "status"]
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _real(value) -> float | None:
+    """Positions and CTRs are stored as REAL; blank stays NULL, never 0."""
+    if value is None or value == "":
+        return None
+    return float(value)
 
 SUMMARY_COLUMNS = [
     "id", "audited_at", "url", "final_url", "target_keyword", "status_code",
@@ -127,3 +172,63 @@ class Storage:
             row = conn.execute("SELECT report_json FROM url_audits WHERE id = ?",
                                (int(audit_id),)).fetchone()
         return json.loads(row["report_json"]) if row else None
+
+    # --- keyword clusters -------------------------------------------------
+
+    def save_keywords(self, result: dict) -> int:
+        rows = [(result["created_at"], result["seed_keyword"], result["country_code"],
+                 result["language"], k["keyword"], k["intent"], k["trend_interest"],
+                 k["trend_direction"], k["opportunity_score"])
+                for k in result["keywords"]]
+        sql = (f"INSERT INTO keyword_clusters ({', '.join(KEYWORD_COLUMNS)}) "
+               f"VALUES ({', '.join('?' for _ in KEYWORD_COLUMNS)})")
+        with closing(self._connect()) as conn, conn:
+            conn.executemany(sql, rows)
+        return len(rows)
+
+    def list_keywords(self, limit: int = 2000) -> list[dict]:
+        sql = (f"SELECT {', '.join(KEYWORD_COLUMNS)} FROM keyword_clusters "
+               "ORDER BY id DESC LIMIT ?")
+        with closing(self._connect()) as conn:
+            return [dict(r) for r in conn.execute(sql, (int(limit),))]
+
+    # --- experiments ------------------------------------------------------
+
+    def log_experiment(self, url: str, target_keyword: str = "", hypothesis: str = "",
+                       changes_made: str = "", baseline_position=None,
+                       baseline_ctr=None) -> int:
+        now = _now()
+        sql = ("INSERT INTO seo_experiments (created_at, updated_at, url, target_keyword, "
+               "hypothesis, changes_made, baseline_position, baseline_ctr, status) "
+               "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        values = (now, now, url.strip(), target_keyword.strip(), hypothesis.strip(),
+                  changes_made.strip(), _real(baseline_position), _real(baseline_ctr),
+                  "Running")
+        with closing(self._connect()) as conn, conn:
+            return int(conn.execute(sql, values).lastrowid)
+
+    def update_experiment(self, experiment_id: int, current_position=None,
+                          current_ctr=None, status: str | None = None) -> bool:
+        if status is not None and status not in EXPERIMENT_STATUSES:
+            raise ValueError(f"Status must be one of {', '.join(EXPERIMENT_STATUSES)}.")
+        sql = ("UPDATE seo_experiments SET updated_at = ?, "
+               "current_position = COALESCE(?, current_position), "
+               "current_ctr = COALESCE(?, current_ctr), "
+               "status = COALESCE(?, status) WHERE id = ?")
+        values = (_now(), _real(current_position), _real(current_ctr), status,
+                  int(experiment_id))
+        with closing(self._connect()) as conn, conn:
+            return conn.execute(sql, values).rowcount == 1
+
+    def list_experiments(self, limit: int = 500) -> list[dict]:
+        sql = (f"SELECT {', '.join(EXPERIMENT_COLUMNS)} FROM seo_experiments "
+               "ORDER BY id DESC LIMIT ?")
+        with closing(self._connect()) as conn:
+            rows = [dict(r) for r in conn.execute(sql, (int(limit),))]
+        for row in rows:
+            base, now = row["baseline_position"], row["current_position"]
+            # Positive means the page moved up the results.
+            row["position_gain"] = round(base - now, 1) if base is not None and now is not None else None
+            base, now = row["baseline_ctr"], row["current_ctr"]
+            row["ctr_change"] = round(now - base, 2) if base is not None and now is not None else None
+        return rows

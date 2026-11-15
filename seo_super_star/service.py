@@ -12,6 +12,28 @@ from .http import fetch_page, normalize_url
 from .schema_gen import generate_jsonld
 from .storage import Storage
 
+def log_seo_optimization_experiment(
+    url: str,
+    target_keyword: str = "",
+    hypothesis: str = "",
+    changes_made: str = "",
+    baseline_position: float | None = None,
+    baseline_ctr: float | None = None,
+    settings: Settings | None = None,
+) -> dict:
+    """Record an optimisation so its effect can be tracked. Returns a JSON-safe dict."""
+    settings = settings or Settings.from_env()
+    url = normalize_url(url)
+    if not url:
+        return {"ok": False, "error": "A URL is required.", "experiment_id": None}
+    try:
+        experiment_id = Storage(settings.db_path).log_experiment(
+            url, target_keyword, hypothesis, changes_made, baseline_position, baseline_ctr)
+    except (ValueError, TypeError) as exc:
+        return {"ok": False, "error": f"Invalid value: {exc}", "experiment_id": None}
+    return {"ok": True, "error": "", "experiment_id": experiment_id, "status": "Running"}
+
+
 # Below this many words in the static HTML, the page is probably rendered
 # client-side, so "auto" mode asks the renderer for the real DOM.
 THIN_STATIC_WORDS = 150
