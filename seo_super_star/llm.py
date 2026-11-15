@@ -29,7 +29,7 @@ def _check(resp: requests.Response) -> dict:
 def _gemini_call(body: dict, settings: Settings) -> dict:
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
            f"{settings.gemini_model}:generateContent")
-    data = _check(requests.post(url, json=body, timeout=60,
+    data = _check(requests.post(url, json=body, timeout=150,
                                 headers={"x-goog-api-key": settings.gemini_api_key}))
     candidates = data.get("candidates") or []
     if not candidates:
@@ -41,8 +41,17 @@ def _gemini(prompt: str, want_json: bool, settings: Settings) -> str:
     config = {"temperature": 0.4}
     if want_json:
         config["responseMimeType"] = "application/json"
-    candidate = _gemini_call({"contents": [{"parts": [{"text": prompt}]}],
-                              "generationConfig": config}, settings)
+    body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
+    # Model "thinking" makes a long brief slow enough to time out, so switch it off.
+    # Models that do not accept the setting answer HTTP 400; retry without it.
+    try:
+        candidate = _gemini_call(
+            {**body, "generationConfig": {**config, "thinkingConfig": {"thinkingBudget": 0}}},
+            settings)
+    except ProviderError as exc:
+        if str(exc) != "HTTP 400":
+            raise
+        candidate = _gemini_call(body, settings)
     return "".join(p.get("text", "") for p in candidate.get("content", {}).get("parts", []))
 
 
