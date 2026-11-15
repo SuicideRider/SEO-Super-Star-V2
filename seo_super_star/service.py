@@ -10,7 +10,8 @@ from .config import Settings
 from .geo import score_geo
 from .http import fetch_page, normalize_url
 from .schema_gen import generate_jsonld
-from .storage import Storage
+from . import google_api, search_performance
+from .storage import open_storage
 
 def log_seo_optimization_experiment(
     url: str,
@@ -27,11 +28,56 @@ def log_seo_optimization_experiment(
     if not url:
         return {"ok": False, "error": "A URL is required.", "experiment_id": None}
     try:
-        experiment_id = Storage(settings.db_path).log_experiment(
+        experiment_id = open_storage(settings).log_experiment(
             url, target_keyword, hypothesis, changes_made, baseline_position, baseline_ctr)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": f"Invalid value: {exc}", "experiment_id": None}
     return {"ok": True, "error": "", "experiment_id": experiment_id, "status": "Running"}
+
+
+def get_gsc_striking_distance_opportunities(
+    site_url: str = "",
+    days: int = 28,
+    min_impressions: int = search_performance.DEFAULT_MIN_IMPRESSIONS,
+    source: str = "auto",
+    csv_data: str | bytes | None = None,
+    settings: Settings | None = None,
+) -> dict:
+    """Bucket search performance rows into opportunities. Returns a JSON-safe dict.
+
+    source: "live" (Search Console API), "csv" (csv_data), "demo", or "auto",
+    which uses csv_data when given, then live data when configured, then demo.
+    """
+    settings = settings or Settings.from_env()
+    note = ""
+    if source == "auto":
+        if csv_data:
+            source = "csv"
+        elif settings.google_service_account_json and (site_url or settings.gsc_site_url):
+            source = "live"
+        else:
+            source, note = "demo", ("No live connection or CSV was supplied, so this is "
+                                    "built-in sample data, not your site.")
+    if source == "csv":
+        parsed = search_performance.parse_csv(csv_data or "")
+        if parsed["error"]:
+            return {"ok": False, "error": parsed["error"], "source": "csv", "rows": []}
+        rows = parsed["rows"]
+    elif source == "live":
+        try:
+            rows = google_api.fetch_search_console_rows(settings, site_url, days)
+        except google_api.GoogleError as exc:
+            return {"ok": False, "error": str(exc), "source": "live", "rows": []}
+        if not rows:
+            return {"ok": False, "source": "live", "rows": [],
+                    "error": "Search Console returned no rows for that property and period."}
+    elif source == "demo":
+        rows = search_performance.demo_rows()
+    else:
+        return {"ok": False, "error": "source must be auto, live, csv or demo.",
+                "source": source, "rows": []}
+    mined = search_performance.mine_opportunities(rows, int(min_impressions))
+    return {"ok": True, "error": "", "source": source, "note": note, **mined}
 
 
 # Below this many words in the static HTML, the page is probably rendered
@@ -116,7 +162,7 @@ def inspect_url_seo_and_geo(
 
     if save:
         try:
-            report["saved_id"] = Storage(settings.db_path).save_audit(report)
+            report["saved_id"] = open_storage(settings).save_audit(report)
         except Exception as exc:  # storage must never break an audit
             report["render_note"] = (report["render_note"] + f" History not saved: {exc}").strip()
     return report

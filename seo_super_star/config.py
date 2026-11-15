@@ -17,6 +17,10 @@ ENV_KEYS = {
     "groq_model": "GROQ_MODEL",
     "openrouter_model": "OPENROUTER_MODEL",
     "db_path": "SEO_DB_PATH",
+    "database_url": "DATABASE_URL",
+    "google_service_account_json": "GOOGLE_SERVICE_ACCOUNT_JSON",
+    "gsc_site_url": "GSC_SITE_URL",
+    "google_sheet_id": "GOOGLE_SHEET_ID",
 }
 
 
@@ -33,6 +37,13 @@ class Settings:
     groq_model: str = "openai/gpt-oss-120b"
     openrouter_model: str = "openrouter/free"
     db_path: str = os.path.join("data", "seo_super_star.db")
+    # Optional cloud Postgres, e.g. postgresql://user:password@host/dbname
+    database_url: str = ""
+    # Optional Google service account (the whole JSON key file as text). It is
+    # used for live Search Console data and for syncing history to a Google Sheet.
+    google_service_account_json: str = ""
+    gsc_site_url: str = ""
+    google_sheet_id: str = ""
     timeout: int = 15
     # Only tests and local development should turn this on.
     allow_private_hosts: bool = False
@@ -63,6 +74,7 @@ class Settings:
 def service_status(settings: Settings) -> list[dict]:
     """Which services run at full quota and which run in fallback mode."""
     llms = settings.llm_providers
+    google = bool(settings.google_service_account_json)
     grounded = [n for n, k in (("Tavily", settings.tavily_api_key),
                                ("Gemini", settings.gemini_api_key)) if k]
     return [
@@ -89,6 +101,17 @@ def service_status(settings: Settings) -> list[dict]:
          "mode": "Full" if grounded else "Fallback",
          "detail": f"AI answers from {', then '.join(grounded)}." if grounded
          else "No AI key: checks search results only, not AI answers."},
-        {"service": "Database", "mode": "Local file",
-         "detail": f"SQLite at {settings.db_path}. Cloud database arrives in phase 4."},
+        {"service": "Live Search Console data",
+         "mode": "Full" if google and settings.gsc_site_url else "Fallback",
+         "detail": f"Connected to {settings.gsc_site_url}." if google and settings.gsc_site_url
+         else "No Google service account or property set: CSV upload and demo data."},
+        {"service": "Google Sheet sync",
+         "mode": "Full" if google and settings.google_sheet_id else "Off",
+         "detail": "Sheet configured." if google and settings.google_sheet_id
+         else "No sheet configured: CSV downloads only."},
+        {"service": "Database",
+         "mode": "Cloud" if settings.database_url else "Local file",
+         "detail": "Cloud Postgres; falls back to the local file if unreachable."
+         if settings.database_url
+         else f"SQLite at {settings.db_path}. Resets when a free host restarts."},
     ]

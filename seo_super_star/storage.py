@@ -132,19 +132,88 @@ def summary_row(report: dict) -> dict:
     }
 
 
+_PG_READY: set[str] = set()      # database URLs whose tables were already created
+
+
+def _pg_connect(database_url: str):
+    """Open a Postgres connection from a postgres:// URL (pure-Python driver)."""
+    import ssl
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    import pg8000.dbapi
+
+    parts = urlparse(database_url)
+    if parts.scheme not in ("postgres", "postgresql") or not parts.hostname:
+        raise ValueError("DATABASE_URL must look like postgresql://user:password@host/dbname")
+    local = parts.hostname in ("localhost", "127.0.0.1")
+    wants_ssl = parse_qs(parts.query).get("sslmode", ["require"])[0] != "disable"
+    return pg8000.dbapi.connect(
+        user=unquote(parts.username or ""), password=unquote(parts.password or ""),
+        host=parts.hostname, port=parts.port or 5432,
+        database=unquote(parts.path.lstrip("/")) or "postgres", timeout=15,
+        ssl_context=ssl.create_default_context() if wants_ssl and not local else None)
+
+
 class Storage:
-    def __init__(self, db_path: str):
+    """History store. Local SQLite file, or cloud Postgres when a URL is given.
+
+    Every method is written once in SQLite dialect; `_run` translates the few
+    differences for Postgres.
+    """
+
+    fallback_reason = ""
+
+    def __init__(self, db_path: str, database_url: str = ""):
         self.db_path = db_path
+        self.database_url = database_url
+        self.backend = "postgres" if database_url else "sqlite"
+        if self.backend == "postgres":
+            if database_url not in _PG_READY:
+                ddl = (_SCHEMA.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+                       .replace(" REAL", " DOUBLE PRECISION"))
+                with closing(self._connect()) as conn:
+                    cursor = conn.cursor()
+                    for statement in filter(str.strip, ddl.split(";")):
+                        cursor.execute(statement)
+                    conn.commit()
+                _PG_READY.add(database_url)
+            return
         folder = os.path.dirname(db_path)
         if folder:
             os.makedirs(folder, exist_ok=True)
         with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @property
+    def label(self) -> str:
+        return "Cloud Postgres" if self.backend == "postgres" else f"Local file ({self.db_path})"
+
+    def _connect(self):
+        if self.backend == "postgres":
+            return _pg_connect(self.database_url)
+        return sqlite3.connect(self.db_path, timeout=10)
+
+    def _run(self, sql: str, params=(), *, many: bool = False, fetch: bool = False,
+             insert_id: bool = False):
+        """Run one statement. Returns rows (fetch), the new id (insert_id) or rowcount."""
+        postgres = self.backend == "postgres"
+        if postgres:
+            sql = sql.replace("?", "%s") + (" RETURNING id" if insert_id else "")
+        with closing(self._connect()) as conn:
+            cursor = conn.cursor()
+            if many:
+                cursor.executemany(sql, params)
+            else:
+                cursor.execute(sql, params)
+            if fetch:
+                names = [d[0] for d in cursor.description]
+                result = [dict(zip(names, row)) for row in cursor.fetchall()]
+            elif insert_id:
+                result = int(cursor.fetchone()[0] if postgres else cursor.lastrowid)
+            else:
+                result = cursor.rowcount
+            conn.commit()
+            return result
 
     def save_audit(self, report: dict) -> int:
         row = summary_row(report)
@@ -157,21 +226,17 @@ class Storage:
         columns = list(row)
         sql = (f"INSERT INTO url_audits ({', '.join(columns)}) "
                f"VALUES ({', '.join('?' for _ in columns)})")
-        with closing(self._connect()) as conn, conn:
-            cursor = conn.execute(sql, [row[c] for c in columns])
-            return int(cursor.lastrowid)
+        return self._run(sql, [row[c] for c in columns], insert_id=True)
 
     def list_audits(self, limit: int = 500) -> list[dict]:
         sql = (f"SELECT {', '.join(SUMMARY_COLUMNS)} FROM url_audits "
                "ORDER BY id DESC LIMIT ?")
-        with closing(self._connect()) as conn:
-            return [dict(r) for r in conn.execute(sql, (int(limit),))]
+        return self._run(sql, (int(limit),), fetch=True)
 
     def get_audit(self, audit_id: int) -> dict | None:
-        with closing(self._connect()) as conn:
-            row = conn.execute("SELECT report_json FROM url_audits WHERE id = ?",
-                               (int(audit_id),)).fetchone()
-        return json.loads(row["report_json"]) if row else None
+        rows = self._run("SELECT report_json FROM url_audits WHERE id = ?",
+                         (int(audit_id),), fetch=True)
+        return json.loads(rows[0]["report_json"]) if rows else None
 
     # --- keyword clusters -------------------------------------------------
 
@@ -182,15 +247,14 @@ class Storage:
                 for k in result["keywords"]]
         sql = (f"INSERT INTO keyword_clusters ({', '.join(KEYWORD_COLUMNS)}) "
                f"VALUES ({', '.join('?' for _ in KEYWORD_COLUMNS)})")
-        with closing(self._connect()) as conn, conn:
-            conn.executemany(sql, rows)
+        if rows:
+            self._run(sql, rows, many=True)
         return len(rows)
 
     def list_keywords(self, limit: int = 2000) -> list[dict]:
         sql = (f"SELECT {', '.join(KEYWORD_COLUMNS)} FROM keyword_clusters "
                "ORDER BY id DESC LIMIT ?")
-        with closing(self._connect()) as conn:
-            return [dict(r) for r in conn.execute(sql, (int(limit),))]
+        return self._run(sql, (int(limit),), fetch=True)
 
     # --- experiments ------------------------------------------------------
 
@@ -204,8 +268,7 @@ class Storage:
         values = (now, now, url.strip(), target_keyword.strip(), hypothesis.strip(),
                   changes_made.strip(), _real(baseline_position), _real(baseline_ctr),
                   "Running")
-        with closing(self._connect()) as conn, conn:
-            return int(conn.execute(sql, values).lastrowid)
+        return self._run(sql, values, insert_id=True)
 
     def update_experiment(self, experiment_id: int, current_position=None,
                           current_ctr=None, status: str | None = None) -> bool:
@@ -217,14 +280,12 @@ class Storage:
                "status = COALESCE(?, status) WHERE id = ?")
         values = (_now(), _real(current_position), _real(current_ctr), status,
                   int(experiment_id))
-        with closing(self._connect()) as conn, conn:
-            return conn.execute(sql, values).rowcount == 1
+        return self._run(sql, values) == 1
 
     def list_experiments(self, limit: int = 500) -> list[dict]:
         sql = (f"SELECT {', '.join(EXPERIMENT_COLUMNS)} FROM seo_experiments "
                "ORDER BY id DESC LIMIT ?")
-        with closing(self._connect()) as conn:
-            rows = [dict(r) for r in conn.execute(sql, (int(limit),))]
+        rows = self._run(sql, (int(limit),), fetch=True)
         for row in rows:
             base, now = row["baseline_position"], row["current_position"]
             # Positive means the page moved up the results.
@@ -232,3 +293,19 @@ class Storage:
             base, now = row["baseline_ctr"], row["current_ctr"]
             row["ctr_change"] = round(now - base, 2) if base is not None and now is not None else None
         return rows
+
+def open_storage(settings) -> Storage:
+    """The cloud database when DATABASE_URL is set and reachable, else the local file.
+
+    A cloud failure never stops the app: it falls back to SQLite and the
+    reason is kept on `fallback_reason` for the status panel.
+    """
+    reason = ""
+    if settings.database_url:
+        try:
+            return Storage(settings.db_path, settings.database_url)
+        except Exception as exc:
+            reason = f"Cloud database unreachable ({exc.__class__.__name__}); using the local file."
+    store = Storage(settings.db_path)
+    store.fallback_reason = reason
+    return store

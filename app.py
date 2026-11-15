@@ -17,7 +17,7 @@ from seo_super_star.config import ENV_KEYS
 from seo_super_star.keywords import discover_keywords_and_trends
 from seo_super_star.schema_gen import SCHEMA_TYPES
 from seo_super_star.service import inspect_url_seo_and_geo, log_seo_optimization_experiment
-from seo_super_star.storage import EXPERIMENT_STATUSES, Storage, summary_row
+from seo_super_star.storage import EXPERIMENT_STATUSES, open_storage, summary_row
 
 st.set_page_config(page_title="SEO Super Star", page_icon="⭐", layout="wide")
 
@@ -455,7 +455,7 @@ def tab_search_performance() -> None:
 
 
 def tab_experiments(settings: Settings) -> None:
-    store = Storage(settings.db_path)
+    store = open_storage(settings)
     st.subheader("Experiment tracker")
     with st.expander("Log a new experiment", expanded=not store.list_experiments(limit=1)):
         with st.form("experiment_form", clear_on_submit=True):

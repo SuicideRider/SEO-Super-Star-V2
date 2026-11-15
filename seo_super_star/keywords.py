@@ -16,7 +16,7 @@ import requests
 from . import trends as trends_module
 from .config import Settings
 from .http import USER_AGENT
-from .storage import Storage
+from .storage import open_storage
 
 QUESTION_MODIFIERS = ["how to {}", "what is {}", "why {}", "best {}", "{} vs",
                       "price of {}", "{} for"]
@@ -174,7 +174,7 @@ def discover_keywords_and_trends(
     result["ok"] = True
     if save:
         try:
-            result["saved"] = Storage(settings.db_path).save_keywords(result)
+            result["saved"] = open_storage(settings).save_keywords(result)
         except Exception as exc:  # storage must never break discovery
             result["trend_status"] += f" History not saved: {exc}"
     return result
