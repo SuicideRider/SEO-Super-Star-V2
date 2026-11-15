@@ -1,0 +1,9 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+markdownify>=0.13
+streamlit>=1.36
+pandas>=2.0
+# pyarrow 26 is blocked by Windows Smart App Control on the dev machine.
+pyarrow<26
+pytest>=8.0
