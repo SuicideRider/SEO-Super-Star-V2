@@ -61,7 +61,17 @@ CREATE TABLE IF NOT EXISTS seo_experiments (
     current_ctr REAL,
     status TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS site_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    source TEXT,
+    pages_audited INTEGER,
+    serious_changes INTEGER,
+    data_json TEXT
+);
 """
+
+KEEP_SITE_RUNS = 60          # older scheduled runs are pruned to keep the database small
 
 EXPERIMENT_STATUSES = ["Running", "Won", "Lost", "Inconclusive"]
 KEYWORD_COLUMNS = ["created_at", "seed_keyword", "country_code", "language", "keyword",
@@ -239,6 +249,38 @@ class Storage:
         rows = self._run("SELECT report_json FROM url_audits WHERE id = ?",
                          (int(audit_id),), fetch=True)
         return json.loads(rows[0]["report_json"]) if rows and rows[0]["report_json"] else None
+
+    def latest_audits_before(self, cutoff: str) -> dict[str, dict]:
+        """url -> the newest summary row saved before `cutoff` (ISO timestamp)."""
+        sql = (f"SELECT {', '.join(SUMMARY_COLUMNS)} FROM url_audits WHERE id IN "
+               "(SELECT MAX(id) FROM url_audits WHERE audited_at < ? GROUP BY url)")
+        return {row["url"]: row for row in self._run(sql, (cutoff,), fetch=True)}
+
+    # --- scheduled runs ---------------------------------------------------
+
+    def save_site_run(self, source: str, pages_audited: int, serious_changes: int,
+                      data: dict) -> int:
+        """Store one scheduled run (its URLs, site-wide issues and changes)."""
+        run_id = self._run(
+            "INSERT INTO site_runs (created_at, source, pages_audited, serious_changes, "
+            "data_json) VALUES (?, ?, ?, ?, ?)",
+            (_now(), source, int(pages_audited), int(serious_changes), json.dumps(data)),
+            insert_id=True)
+        self._run("DELETE FROM site_runs WHERE id NOT IN "
+                  "(SELECT id FROM site_runs ORDER BY id DESC LIMIT ?)", (KEEP_SITE_RUNS,))
+        return run_id
+
+    def latest_site_run(self, source: str | None = None) -> dict | None:
+        """The most recent scheduled run, optionally for one sitemap."""
+        where, params = ("WHERE source = ? ", (source,)) if source else ("", ())
+        rows = self._run("SELECT id, created_at, source, pages_audited, serious_changes, "
+                         f"data_json FROM site_runs {where}ORDER BY id DESC LIMIT 1",
+                         params, fetch=True)
+        if not rows:
+            return None
+        run = rows[0]
+        run["data"] = json.loads(run.pop("data_json") or "{}")
+        return run
 
     # --- keyword clusters -------------------------------------------------
 

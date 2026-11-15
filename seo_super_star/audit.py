@@ -79,6 +79,7 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> dict:
     base_host = _host(base_url)
     internal = external = nofollow = 0
     empty_anchors: list[str] = []
+    internal_urls: list[str] = []
     external_domains: list[str] = []
     social: list[str] = []
     phones: list[str] = []
@@ -98,6 +99,9 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> dict:
             continue
         if host == base_host or host.endswith("." + base_host):
             internal += 1
+            clean = target.split("#")[0]
+            if clean not in internal_urls and len(internal_urls) < 400:
+                internal_urls.append(clean)
         else:
             external += 1
             if host not in external_domains:
@@ -117,6 +121,7 @@ def _extract_links(soup: BeautifulSoup, base_url: str) -> dict:
         "internal": internal, "external": external, "nofollow": nofollow,
         "empty_anchor_count": len(empty_anchors),
         "empty_anchors": empty_anchors[:50],
+        "internal_urls": internal_urls,
         "external_domains": external_domains,
         "social_profiles": social[:20],
         "phones": list(dict.fromkeys(phones))[:5],

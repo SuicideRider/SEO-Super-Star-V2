@@ -83,8 +83,11 @@ def check_public_url(url: str) -> str:
 
 
 def fetch_page(url: str, timeout: int = 15, allow_private: bool = False,
-               session: requests.Session | None = None) -> FetchResult:
+               session: requests.Session | None = None,
+               read_body: bool = True) -> FetchResult:
     """Fetch a URL, following redirects one hop at a time.
+
+    read_body=False returns the status and headers only (used for link checks).
 
     Each hop is checked against the private-network guard, so a public URL
     cannot redirect the auditor into an internal address.
@@ -119,10 +122,11 @@ def fetch_page(url: str, timeout: int = 15, allow_private: bool = False,
                 continue
 
             body = b""
-            for chunk in resp.iter_content(chunk_size=65536):
-                body += chunk
-                if len(body) >= MAX_BODY_BYTES:
-                    break
+            if read_body:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    body += chunk
+                    if len(body) >= MAX_BODY_BYTES:
+                        break
             resp.close()
             result.final_url = current
             result.status_code = resp.status_code

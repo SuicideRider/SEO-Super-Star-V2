@@ -108,7 +108,7 @@ def test_postgres_dialect_and_fallback(tmp_path, monkeypatch):
     assert store.backend == "postgres" and store.label == "Cloud Postgres"
     ddl = " ".join(log)
     assert "BIGSERIAL PRIMARY KEY" in ddl and "AUTOINCREMENT" not in ddl
-    assert "DOUBLE PRECISION" in ddl and ddl.count("CREATE TABLE") == 3
+    assert "DOUBLE PRECISION" in ddl and ddl.count("CREATE TABLE") == 4
     log.clear()
     assert store.log_experiment("https://shop.com/", baseline_position=4.2) == 7
     assert "%s" in log[0] and "?" not in log[0] and log[0].endswith("RETURNING id")

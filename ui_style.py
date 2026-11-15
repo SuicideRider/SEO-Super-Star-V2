@@ -78,7 +78,8 @@ h3 { color:#3A2A9E; }
 
 _GOOD = {"full", "cloud"}
 _OFF = {"off"}
-SEVERITY_ICONS = {"High": "🔴 High", "Medium": "🟠 Medium", "Low": "🟡 Low"}
+SEVERITY_ICONS = {"High": "🔴 High", "Medium": "🟠 Medium", "Low": "🟡 Low",
+                  "Good": "🟢 Better", "Info": "🔵 Note"}
 
 
 def apply() -> None:

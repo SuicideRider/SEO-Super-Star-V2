@@ -11,9 +11,9 @@ import csv
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
-from . import citations, competitors, google_api, keywords, service, sitemap
+from . import changes, citations, competitors, google_api, keywords, service, sitemap
 from .config import Settings, service_status
 from .storage import SUMMARY_COLUMNS, open_storage
 
@@ -30,7 +30,9 @@ def run_daily(config_path: str, settings: Settings, output_dir: str = "reports")
     """Audit the pages named in the automation config, then sync the sheet.
 
     Config keys: "sitemap" (URL), "urls" (list), "max_urls" (default 25),
-    "target_keyword". With nothing configured the job reports that and stops.
+    "target_keyword", "fail_on_regression" (exit with an error when something
+    serious broke since the last run, so the scheduler sends an alert).
+    With nothing configured the job reports that and stops.
     """
     out = {"ok": False, "error": "", "date": date.today().isoformat(), "pages_audited": 0,
            "pages_failed": 0, "csv": "", "sheet": None, "database": ""}
@@ -44,13 +46,15 @@ def run_daily(config_path: str, settings: Settings, output_dir: str = "reports")
         out["error"] = f"{config_path} is not valid JSON: {exc}"
         return out
 
-    rows, failed = [], []
+    rows, failed, site = [], [], None
     keyword = config.get("target_keyword", "")
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if config.get("sitemap"):
         result = sitemap.spider_xml_sitemap(config["sitemap"], int(config.get("max_urls", 25)),
                                             keyword, settings,
                                             max_cap=sitemap.MAX_SCHEDULED)
         out["urls_in_sitemap"] = result["urls_found"]
+        site = result["site"]
         rows += result["pages"]
         failed += result["failed"]
         if not result["ok"]:
@@ -72,12 +76,73 @@ def run_daily(config_path: str, settings: Settings, output_dir: str = "reports")
     if rows:
         out["csv"] = os.path.join(output_dir, f"audit_{out['date']}.csv")
         _write_csv(out["csv"], rows, [c for c in SUMMARY_COLUMNS if c != "id"] + ["top_issue"])
+
+    # Site-wide findings and what changed since the last run.
+    source = config.get("sitemap") or "url list"
+    site_issues = site["issues"] if site else None
+    last_run = store.latest_site_run(source)
+    diff = changes.compare_runs(store.latest_audits_before(started), rows, failed,
+                                last_run["data"] if last_run else None, site_issues)
+    out["site_issues"] = site["summary"] if site else {}
+    out["site_note"] = site["note"] if site else ""
+    out["changes"] = {**diff["summary"], "note": diff["note"],
+                      "serious_examples": [c for c in diff["changes"]
+                                           if c["severity"] == "High"][:10]}
+    if site_issues:
+        out["site_csv"] = os.path.join(output_dir, f"site_issues_{out['date']}.csv")
+        _write_csv(out["site_csv"], site_issues, ["severity", "check", "url", "detail"])
+    if diff["changes"]:
+        out["changes_csv"] = os.path.join(output_dir, f"changes_{out['date']}.csv")
+        _write_csv(out["changes_csv"], diff["changes"],
+                   ["severity", "change", "url", "before", "after"])
+    try:
+        store.save_site_run(source, len(rows), diff["summary"]["serious"], {
+            "urls": [r["url"] for r in rows] + [f["url"] for f in failed],
+            "site_issues": (site_issues or [])[:1500], "site_summary": out["site_issues"],
+            "site_note": out["site_note"], "changes": diff["changes"][:500],
+            "change_summary": diff["summary"], "change_note": diff["note"]})
+    except Exception as exc:              # history must never break the run
+        out["site_note"] = (out["site_note"] + f" Run not saved: {exc}").strip()
+    _write_job_summary(out, site_issues or [], diff)
+
     if settings.google_sheet_id:
         out["sheet"] = google_api.sync_history_to_sheet(store, settings)
     out["ok"] = bool(rows)
     if not rows:
         out["error"] = "No page could be audited."
+    elif config.get("fail_on_regression") and diff["summary"]["serious"]:
+        out["ok"] = False
+        out["error"] = (f"{diff['summary']['serious']} serious regression(s) since the last "
+                        "run. See changes_csv.")
     return out
+
+
+def _write_job_summary(out: dict, site_issues: list[dict], diff: dict) -> None:
+    """Readable summary on the GitHub Actions run page (no-op elsewhere)."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    def cell(text) -> str:
+        return str(text).replace("|", "\\|").replace("\n", " ")[:300]
+    lines = [f"## SEO audit {out['date']}",
+             f"- Pages audited: **{out['pages_audited']}** (failed: {out['pages_failed']})",
+             f"- Database: {out['database']}",
+             f"- Changes since last run: **{diff['summary']['regressions']}** regressions "
+             f"({diff['summary']['serious']} serious), {diff['summary']['improvements']} "
+             f"improvements. {diff['note']}", "", "### Site-wide issues"]
+    lines += [f"- {name}: {count}" for name, count in sorted(out["site_issues"].items())] or ["- None"]
+    worst = [c for c in diff["changes"] if c["severity"] in ("High", "Medium")][:30]
+    if worst:
+        lines += ["", "### What got worse", "| Severity | Change | URL | Before | After |",
+                  "|---|---|---|---|---|"]
+        lines += [f"| {c['severity']} | {cell(c['change'])} | {cell(c['url'])} | "
+                  f"{cell(c['before'])} | {cell(c['after'])} |" for c in worst]
+    high = [i for i in site_issues if i["severity"] == "High"][:30]
+    if high:
+        lines += ["", "### Serious site-wide issues", "| Check | URL | Detail |", "|---|---|---|"]
+        lines += [f"| {cell(i['check'])} | {cell(i['url'])} | {cell(i['detail'])} |" for i in high]
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:

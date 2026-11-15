@@ -2,5 +2,6 @@
   "sitemap": "https://www.zirius.no/sitemap_index.xml",
   "urls": [],
   "max_urls": 1000,
-  "target_keyword": ""
+  "target_keyword": "",
+  "fail_on_regression": true
 }

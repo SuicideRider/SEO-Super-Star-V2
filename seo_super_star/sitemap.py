@@ -86,22 +86,25 @@ def collect_sitemap_urls(sitemap_url: str, settings: Settings, limit: int = MAX_
 
 def spider_xml_sitemap(sitemap_url: str, max_urls: int = 25, target_keyword: str = "",
                        settings: Settings | None = None, save: bool = True,
-                       max_cap: int = MAX_BATCH) -> dict:
+                       max_cap: int = MAX_BATCH, site_wide: bool = True) -> dict:
     """Audit up to `max_urls` pages listed in a sitemap. Returns a JSON-safe dict.
 
     max_urls is capped at max_cap. Each page is saved to history as a summary row.
+    site_wide adds cross-page checks (broken links, duplicates, orphans) as "site".
     """
+    from . import site_checks
     from .service import inspect_url_seo_and_geo          # avoids an import cycle
     from .storage import summary_row
 
     settings = settings or Settings.from_env()
     max_urls = max(1, min(int(max_urls), int(max_cap)))
     found = collect_sitemap_urls(sitemap_url, settings, _MAX_SCAN)
-    urls_in_sitemap = len(found["urls"])
-    found["urls"] = found["urls"][:max_urls]
+    all_urls = found["urls"]
+    urls_in_sitemap = len(all_urls)
+    found["urls"] = all_urls[:max_urls]
     out = {"sitemap_url": sitemap_url, "ok": False, "error": found["error"],
            "sitemaps_read": found["sitemaps_read"], "urls_found": urls_in_sitemap,
-           "pages": [], "failed": [], "summary": {}}
+           "pages": [], "failed": [], "summary": {}, "site": None}
     if not found["urls"]:
         return out
 
@@ -113,6 +116,8 @@ def spider_xml_sitemap(sitemap_url: str, max_urls: int = 25, target_keyword: str
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         reports = list(pool.map(audit, found["urls"]))
+    if site_wide:
+        out["site"] = site_checks.analyze_site(reports, all_urls, settings)
     for report in reports:
         if not report["ok"]:
             out["failed"].append({"url": report["url"], "error": report["error"]})

@@ -56,7 +56,8 @@ def inspect_url_seo_and_geo(url: str, target_keyword: str = "", schema_type: str
 def spider_xml_sitemap(sitemap_url: str, max_urls: int = 25, target_keyword: str = "") -> dict:
     """Batch-audit the pages listed in an XML sitemap (or a site URL, whose sitemap is
     looked up in robots.txt). Returns one summary row per page, sorted worst first,
-    plus site-wide averages. max_urls is capped at 100."""
+    plus site-wide averages and, under "site", cross-page issues: broken links,
+    redirects, duplicate titles, orphan pages. max_urls is capped at 100."""
     return sitemap.spider_xml_sitemap(sitemap_url, max_urls=max_urls,
                                       target_keyword=target_keyword)
 

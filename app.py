@@ -477,6 +477,66 @@ def sitemap_batch(settings: Settings) -> None:
             st.dataframe(pd.DataFrame(result["failed"]), hide_index=True)
     st.download_button("Download sitemap audit (CSV)", frame.to_csv(index=False),
                        file_name="sitemap_audit.csv", mime="text/csv")
+    if result.get("site"):
+        st.markdown("#### 🕸️ Site-wide issues")
+        st.caption("Problems that only show when pages are compared: broken links, "
+                   "redirects, duplicates and pages nothing links to. "
+                   f"{result['site']['links_checked']} linked URL(s) were checked.")
+        show_site_issues(result["site"]["issues"], result["site"]["summary"],
+                         result["site"]["note"], "sitemap")
+
+
+def with_icons(rows: list[dict]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    frame["severity"] = frame["severity"].map(
+        lambda level: ui_style.SEVERITY_ICONS.get(level, level))
+    return frame
+
+
+def show_site_issues(issues: list[dict], summary: dict, note: str, key: str) -> None:
+    if note:
+        st.caption(note)
+    if not issues:
+        st.success("🎉 No site-wide issues found.")
+        return
+    st.dataframe(pd.DataFrame([{"Check": name, "Count": count} for name, count in
+                               sorted(summary.items(), key=lambda item: -item[1])]),
+                 hide_index=True)
+    checks = sorted({i["check"] for i in issues})
+    chosen = st.selectbox("Show", ["All checks"] + checks, key=f"site_check_{key}")
+    shown = [i for i in issues if chosen in ("All checks", i["check"])]
+    st.dataframe(with_icons(shown)[["severity", "check", "url", "detail"]], hide_index=True)
+    st.download_button("Download site-wide issues (CSV)", pd.DataFrame(issues).to_csv(index=False),
+                       file_name="site_issues.csv", mime="text/csv", key=f"site_csv_{key}")
+
+
+def daily_monitor(store) -> None:
+    st.subheader("🛰️ Daily monitor")
+    ui_style.intro("What changed on the site since yesterday?",
+                   "The scheduled job audits the whole sitemap every day and lists what got "
+                   "worse, what got better, and site-wide problems such as broken links.")
+    run = store.latest_site_run()
+    if not run:
+        st.info("No scheduled run saved yet. It appears here after the daily job has run "
+                "with the cloud database connected.")
+        return
+    data = run["data"]
+    summary = data.get("change_summary") or {}
+    cols = st.columns(4)
+    cols[0].metric("Pages audited", run["pages_audited"])
+    cols[1].metric("Serious regressions", summary.get("serious", 0))
+    cols[2].metric("All regressions", summary.get("regressions", 0))
+    cols[3].metric("Improvements", summary.get("improvements", 0))
+    st.caption(f"Last run: {run['created_at']} | {run['source']}")
+    st.markdown("**Changes since the previous run**")
+    if data.get("changes"):
+        st.dataframe(with_icons(data["changes"])[["severity", "change", "url", "before", "after"]],
+                     hide_index=True)
+    else:
+        st.info(data.get("change_note") or "Nothing changed since the previous run.")
+    st.markdown("**Site-wide issues in the last run**")
+    show_site_issues(data.get("site_issues") or [], data.get("site_summary") or {},
+                     data.get("site_note") or "", "monitor")
 
 
 def tab_search_performance(settings: Settings) -> None:
@@ -564,6 +624,8 @@ def tab_experiments(settings: Settings) -> None:
                            + f". [Open the sheet]({synced['sheet_url']})")
             else:
                 st.error(synced["error"])
+    daily_monitor(store)
+    st.divider()
     st.subheader("🧪 Experiment tracker")
     ui_style.intro("Did the change work?",
                    "Write down each change you make to a page, then record the ranking "
