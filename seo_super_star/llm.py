@@ -27,11 +27,29 @@ def _check(resp: requests.Response) -> dict:
     return resp.json()
 
 
+# Tried in order when the configured model is no longer served (HTTP 404).
+# Lite models answer fast; the larger Flash models think first and can time out.
+GEMINI_FALLBACKS = ("gemini-3.1-flash-lite", "gemini-flash-lite-latest")
+GROQ_FALLBACKS = ("openai/gpt-oss-20b", "llama-3.1-8b-instant")
+
+
+def _with_fallbacks(first: str, others: tuple[str, ...], call):
+    """Run call(model) for each model until one is not answered with HTTP 404."""
+    models = list(dict.fromkeys([first, *others]))
+    for index, model in enumerate(models):
+        try:
+            return call(model)
+        except ProviderError as exc:
+            if str(exc) != "HTTP 404" or index == len(models) - 1:
+                raise
+
+
 def _gemini_call(body: dict, settings: Settings) -> dict:
-    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{settings.gemini_model}:generateContent")
-    data = _check(requests.post(url, json=body, timeout=150,
-                                headers={"x-goog-api-key": settings.gemini_api_key}))
+    def call(model: str) -> dict:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        return _check(requests.post(url, json=body, timeout=60,
+                                    headers={"x-goog-api-key": settings.gemini_api_key}))
+    data = _with_fallbacks(settings.gemini_model, GEMINI_FALLBACKS, call)
     candidates = data.get("candidates") or []
     if not candidates:
         raise ProviderError("empty response")
@@ -45,16 +63,17 @@ def _gemini(prompt: str, want_json: bool, settings: Settings) -> str:
     if want_json:
         config["responseMimeType"] = "application/json"
     body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
-    strict = {**config, "thinkingConfig": {"thinkingBudget": 0}}
     if isinstance(want_json, dict):
-        strict["responseSchema"] = want_json
-    # Thinking off and a fixed schema keep the reply short and fast. Models that
-    # do not accept those settings answer HTTP 400; retry without them.
-    try:
-        candidate = _gemini_call({**body, "generationConfig": strict}, settings)
-    except ProviderError as exc:
-        if str(exc) != "HTTP 400":
-            raise
+        # A fixed schema keeps the reply short. A model that rejects it answers
+        # HTTP 400; retry with plain JSON mode.
+        try:
+            candidate = _gemini_call(
+                {**body, "generationConfig": {**config, "responseSchema": want_json}}, settings)
+        except ProviderError as exc:
+            if str(exc) != "HTTP 400":
+                raise
+            candidate = _gemini_call(body, settings)
+    else:
         candidate = _gemini_call(body, settings)
     return "".join(p.get("text", "") for p in candidate.get("content", {}).get("parts", []))
 
@@ -70,8 +89,17 @@ def _openai_style(url: str, key: str, model: str, prompt: str, want_json: bool) 
 
 
 def _groq(prompt: str, want_json: bool, settings: Settings) -> str:
-    return _openai_style("https://api.groq.com/openai/v1/chat/completions",
-                         settings.groq_api_key, settings.groq_model, prompt, want_json)
+    url = "https://api.groq.com/openai/v1/chat/completions"
+
+    def call(model: str) -> str:
+        try:
+            return _openai_style(url, settings.groq_api_key, model, prompt, want_json)
+        except ProviderError as exc:
+            # Some models reject JSON mode; the prompt already asks for JSON.
+            if str(exc) != "HTTP 400" or not want_json:
+                raise
+            return _openai_style(url, settings.groq_api_key, model, prompt, False)
+    return _with_fallbacks(settings.groq_model, GROQ_FALLBACKS, call)
 
 
 def _openrouter(prompt: str, want_json: bool, settings: Settings) -> str:

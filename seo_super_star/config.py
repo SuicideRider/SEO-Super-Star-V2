@@ -29,8 +29,8 @@ class Settings:
     groq_api_key: str = ""
     openrouter_api_key: str = ""
     # Free-tier model names change; override them with environment variables.
-    gemini_model: str = "gemini-flash-latest"
-    groq_model: str = "llama-3.3-70b-versatile"
+    gemini_model: str = "gemini-3.5-flash-lite"
+    groq_model: str = "openai/gpt-oss-120b"
     openrouter_model: str = "openrouter/free"
     db_path: str = os.path.join("data", "seo_super_star.db")
     timeout: int = 15
