@@ -29,6 +29,23 @@ Return one JSON object with exactly these keys:
 Recommended length: about {target} words. Return JSON only."""
 
 
+_STR = {"type": "STRING"}
+_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title": _STR, "meta_description": _STR, "h1": _STR, "direct_answer": _STR,
+        "outline": {"type": "ARRAY", "items": {
+            "type": "OBJECT",
+            "properties": {"h2": _STR, "h3": {"type": "ARRAY", "items": _STR}},
+            "required": ["h2", "h3"]}},
+        "faqs": {"type": "ARRAY", "items": {
+            "type": "OBJECT", "properties": {"question": _STR, "answer": _STR},
+            "required": ["question", "answer"]}},
+    },
+    "required": ["title", "meta_description", "h1", "direct_answer", "outline", "faqs"],
+}
+
+
 def _trim(text: str, limit: int) -> str:
     text = " ".join(text.split())
     if len(text) <= limit:
@@ -91,7 +108,7 @@ def build_brief(analysis: dict, settings: Settings) -> dict:
         return brief
     prompt = _PROMPT.format(keyword=analysis["keyword"], research=_research(analysis),
                             target=analysis["target_word_count"])
-    reply = llm.generate(prompt, settings, want_json=True)
+    reply = llm.generate(prompt, settings, want_json=_SCHEMA)
     data = llm.parse_json(reply["text"]) if reply["ok"] else None
     if not data or not isinstance(data.get("outline"), list):
         tried = ", ".join(f"{a['provider']}: {a['outcome']}" for a in reply["attempts"])

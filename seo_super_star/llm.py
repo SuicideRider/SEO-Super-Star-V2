@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import requests
 
@@ -38,16 +39,19 @@ def _gemini_call(body: dict, settings: Settings) -> dict:
 
 
 def _gemini(prompt: str, want_json: bool, settings: Settings) -> str:
-    config = {"temperature": 0.4}
+    # The output cap matters: in JSON mode the model can otherwise pad its reply
+    # with whitespace until the request times out.
+    config = {"temperature": 0.4, "maxOutputTokens": 8192}
     if want_json:
         config["responseMimeType"] = "application/json"
     body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
-    # Model "thinking" makes a long brief slow enough to time out, so switch it off.
-    # Models that do not accept the setting answer HTTP 400; retry without it.
+    strict = {**config, "thinkingConfig": {"thinkingBudget": 0}}
+    if isinstance(want_json, dict):
+        strict["responseSchema"] = want_json
+    # Thinking off and a fixed schema keep the reply short and fast. Models that
+    # do not accept those settings answer HTTP 400; retry without them.
     try:
-        candidate = _gemini_call(
-            {**body, "generationConfig": {**config, "thinkingConfig": {"thinkingBudget": 0}}},
-            settings)
+        candidate = _gemini_call({**body, "generationConfig": strict}, settings)
     except ProviderError as exc:
         if str(exc) != "HTTP 400":
             raise
@@ -80,19 +84,25 @@ _PROVIDERS = [("Gemini", "gemini_api_key", _gemini), ("Groq", "groq_api_key", _g
               ("OpenRouter", "openrouter_api_key", _openrouter)]
 
 
-def generate(prompt: str, settings: Settings | None = None, want_json: bool = False) -> dict:
+def generate(prompt: str, settings: Settings | None = None,
+             want_json: bool | dict = False) -> dict:
+    """want_json may be True, or a response schema that Gemini will enforce."""
     settings = settings or Settings.from_env()
     out = {"ok": False, "provider": "", "text": "", "attempts": []}
     for name, key_field, provider in _PROVIDERS:
         if not getattr(settings, key_field):
             continue
+        started = time.monotonic()
         try:
             text = provider(prompt, want_json, settings).strip()
         except ProviderError as exc:
             out["attempts"].append({"provider": name, "outcome": str(exc)})
             continue
-        except (requests.exceptions.RequestException, ValueError, KeyError,
-                IndexError, TypeError) as exc:
+        except requests.exceptions.RequestException as exc:
+            out["attempts"].append({"provider": name, "outcome": (
+                f"{exc.__class__.__name__} after {time.monotonic() - started:.0f}s")})
+            continue
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
             out["attempts"].append({"provider": name, "outcome": exc.__class__.__name__})
             continue
         if not text:
