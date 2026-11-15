@@ -16,7 +16,10 @@ from seo_super_star.competitors import reverse_engineer_serp_competitors
 from seo_super_star.config import ENV_KEYS
 from seo_super_star.keywords import discover_keywords_and_trends
 from seo_super_star.schema_gen import SCHEMA_TYPES
-from seo_super_star.service import inspect_url_seo_and_geo, log_seo_optimization_experiment
+from seo_super_star.google_api import service_account_email, sync_history_to_sheet
+from seo_super_star.service import (get_gsc_striking_distance_opportunities,
+                                    inspect_url_seo_and_geo, log_seo_optimization_experiment)
+from seo_super_star.sitemap import spider_xml_sitemap
 from seo_super_star.storage import EXPERIMENT_STATUSES, open_storage, summary_row
 
 st.set_page_config(page_title="SEO Super Star", page_icon="⭐", layout="wide")
@@ -411,11 +414,77 @@ def citation_monitor(settings: Settings) -> None:
         st.dataframe(pd.DataFrame(result["top_competitors"]), hide_index=True)
 
 
-def tab_search_performance() -> None:
+def sitemap_batch(settings: Settings) -> None:
+    st.divider()
+    st.subheader("Sitemap batch audit")
+    with st.form("sitemap_form"):
+        left, right = st.columns([4, 1])
+        sitemap_url = left.text_input("Sitemap or site URL",
+                                      placeholder="https://example.com/sitemap.xml")
+        max_urls = right.number_input("Pages", min_value=1, max_value=100, value=25)
+        submitted = st.form_submit_button("Audit sitemap", type="primary")
+    st.caption("Audits the static HTML of each page (no JavaScript rendering or speed "
+               "test) and saves each page to history.")
+    if submitted:
+        with st.spinner("Auditing pages..."):
+            st.session_state["sitemap"] = spider_xml_sitemap(
+                sitemap_url, max_urls=int(max_urls), settings=settings)
+    result = st.session_state.get("sitemap")
+    if not result:
+        return
+    if not result["ok"]:
+        st.error(result["error"])
+        return
+    summary = result["summary"]
+    cols = st.columns(5)
+    cols[0].metric("Pages audited", summary["pages_audited"])
+    cols[1].metric("Total issues", summary["total_issues"])
+    cols[2].metric("Average GEO", summary["avg_geo_score"])
+    cols[3].metric("Title problems", summary["pages_with_title_problems"])
+    cols[4].metric("No schema", summary["pages_without_schema"])
+    st.caption(f"Sitemaps read: {', '.join(result['sitemaps_read'])}")
+    frame = pd.DataFrame(result["pages"])
+    st.dataframe(frame[["url", "status_code", "issue_count", "top_issue", "geo_score",
+                        "word_count", "title_status", "description_status", "h1_count",
+                        "schema_types", "response_ms"]], hide_index=True)
+    if result["failed"]:
+        with st.expander(f"{len(result['failed'])} page(s) could not be audited"):
+            st.dataframe(pd.DataFrame(result["failed"]), hide_index=True)
+    st.download_button("Download sitemap audit (CSV)", frame.to_csv(index=False),
+                       file_name="sitemap_audit.csv", mime="text/csv")
+
+
+def tab_search_performance(settings: Settings) -> None:
     st.subheader("Search performance opportunity miner")
-    source = st.radio("Data source", ["Demo dataset", "Upload CSV"], horizontal=True)
+    source = st.radio("Data source", ["Demo dataset", "Upload CSV", "Live Search Console"],
+                      horizontal=True)
     rows: list[dict] = []
-    if source == "Upload CSV":
+    if source == "Live Search Console":
+        if not settings.google_service_account_json:
+            st.info("Live data needs a free Google service account saved in the app's "
+                    "secrets as GOOGLE_SERVICE_ACCOUNT_JSON. Until then, use CSV upload.")
+            return
+        with st.form("gsc_form"):
+            left, right = st.columns([3, 1])
+            site = left.text_input("Search Console property", value=settings.gsc_site_url,
+                                   placeholder="sc-domain:example.com")
+            days = right.number_input("Days", min_value=1, max_value=480, value=28)
+            if st.form_submit_button("Fetch live data", type="primary"):
+                with st.spinner("Asking Search Console..."):
+                    st.session_state["gsc_live"] = get_gsc_striking_distance_opportunities(
+                        site_url=site, days=int(days), source="live", settings=settings)
+        live = st.session_state.get("gsc_live")
+        if not live:
+            st.caption("The service account's email must be added as a user on the "
+                       f"property: {service_account_email(settings) or 'unknown'}")
+            return
+        if not live["ok"]:
+            st.error(live["error"])
+            return
+        rows = [{k: r[k] for k in ("query", "page", "clicks", "impressions", "ctr", "position")}
+                for r in live["rows"]]
+        st.caption(f"{len(rows)} live rows from Search Console.")
+    elif source == "Upload CSV":
         st.caption("Export the Queries or Pages table from your search console's "
                    "Performance report. Needed columns: query or page, impressions, "
                    "position; clicks and CTR are used when present.")
@@ -450,12 +519,23 @@ def tab_search_performance() -> None:
                  hide_index=True)
     st.download_button("Download opportunities (CSV)", frame.to_csv(index=False),
                        file_name="search_opportunities.csv", mime="text/csv")
-    st.caption("Potential clicks is a rough estimate from typical click shares by "
-               "position. A direct connection to live search data arrives in phase 4.")
+    st.caption("Potential clicks is a rough estimate from typical click shares by position.")
 
 
 def tab_experiments(settings: Settings) -> None:
     store = open_storage(settings)
+    st.caption(f"History database: {store.label}")
+    if store.fallback_reason:
+        st.warning(store.fallback_reason)
+    if settings.google_sheet_id and settings.google_service_account_json:
+        if st.button("Sync history to Google Sheet"):
+            with st.spinner("Writing to the sheet..."):
+                synced = sync_history_to_sheet(store, settings)
+            if synced["ok"]:
+                st.success("Synced " + ", ".join(f"{n} {t.lower()}" for t, n in synced["tabs"].items())
+                           + f". [Open the sheet]({synced['sheet_url']})")
+            else:
+                st.error(synced["error"])
     st.subheader("Experiment tracker")
     with st.expander("Log a new experiment", expanded=not store.list_experiments(limit=1)):
         with st.form("experiment_form", clear_on_submit=True):
@@ -516,12 +596,9 @@ def tab_experiments(settings: Settings) -> None:
                            file_name="keyword_history.csv", mime="text/csv")
     else:
         st.info("No keyword runs saved yet.")
-    st.caption("History is stored in a local file for now. On the free host it "
-               "resets when the app restarts, until the cloud database is added.")
-
-
-def coming(phase: int, what: str) -> None:
-    st.info(f"{what} arrives in phase {phase}.")
+    if store.backend == "sqlite":
+        st.caption("History is in a local file. On the free host it resets when the app "
+                   "restarts; add a DATABASE_URL secret for a cloud database to keep it.")
 
 
 def main() -> None:
@@ -531,6 +608,7 @@ def main() -> None:
                     "4 GEO & schema", "5 Search performance", "6 History & experiments"])
     with tabs[0]:
         tab_technical(settings)
+        sitemap_batch(settings)
     with tabs[1]:
         tab_keywords(settings)
     with tabs[2]:
@@ -539,7 +617,7 @@ def main() -> None:
         tab_geo(settings)
         citation_monitor(settings)
     with tabs[4]:
-        tab_search_performance()
+        tab_search_performance(settings)
     with tabs[5]:
         tab_experiments(settings)
 
