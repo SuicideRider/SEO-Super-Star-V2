@@ -10,6 +10,10 @@ import streamlit as st
 
 from seo_super_star.config import Settings, service_status
 from seo_super_star import search_performance
+from seo_super_star.brief import brief_to_markdown
+from seo_super_star.citations import check_brand_ai_citation_visibility
+from seo_super_star.competitors import reverse_engineer_serp_competitors
+from seo_super_star.config import ENV_KEYS
 from seo_super_star.keywords import discover_keywords_and_trends
 from seo_super_star.schema_gen import SCHEMA_TYPES
 from seo_super_star.service import inspect_url_seo_and_geo, log_seo_optimization_experiment
@@ -19,7 +23,7 @@ st.set_page_config(page_title="SEO Super Star", page_icon="⭐", layout="wide")
 
 # Hosted secrets become environment variables so the engine reads one source.
 try:
-    for _name in ("PAGESPEED_API_KEY", "JINA_API_KEY"):
+    for _name in ENV_KEYS.values():
         if _name in st.secrets and not os.environ.get(_name):
             os.environ[_name] = str(st.secrets[_name])
 except Exception:
@@ -31,10 +35,14 @@ def sidebar_settings() -> Settings:
         st.header("Optional keys")
         st.caption("Everything works without keys. Keys entered here last for "
                    "this browser session only and are not saved.")
-        pagespeed_key = st.text_input("PageSpeed Insights API key", type="password")
-        jina_key = st.text_input("Reader (JS rendering) API key", type="password")
-        settings = Settings.from_env({"pagespeed_api_key": pagespeed_key,
-                                      "jina_api_key": jina_key})
+        labels = {"tavily_api_key": "Tavily key (live search, AI answers)",
+                  "gemini_api_key": "Gemini key (AI writing, AI answers)",
+                  "groq_api_key": "Groq key (AI writing fallback)",
+                  "openrouter_api_key": "OpenRouter key (AI writing fallback)",
+                  "pagespeed_api_key": "PageSpeed Insights key",
+                  "jina_api_key": "Reader key (JS rendering)"}
+        settings = Settings.from_env({name: st.text_input(label, type="password")
+                                      for name, label in labels.items()})
         st.header("System & quota status")
         for item in service_status(settings):
             st.markdown(f"**{item['service']}**: {item['mode']}")
@@ -230,7 +238,6 @@ def tab_geo(settings: Settings) -> None:
         st.code(json.dumps(schema["faq"], indent=2, ensure_ascii=False), language="json")
     else:
         st.caption("No FAQPage generated: the page has no question headings with answers.")
-    coming(3, "The AI citation visibility monitor")
 
 
 def tab_keywords(settings: Settings) -> None:
@@ -281,6 +288,127 @@ def tab_keywords(settings: Settings) -> None:
                "Trend interest is the last four weeks as a percentage of the "
                "keyword's own 12-month peak; it is looked up for the seed and "
                "the top-ranked keywords only.")
+
+
+def tab_serp(settings: Settings) -> None:
+    st.subheader("Competitor gap and content brief")
+    with st.form("serp_form"):
+        keyword = st.text_input("Target keyword", placeholder="best standing desk")
+        left, middle, right = st.columns([3, 1, 1])
+        my_url = left.text_input("Your page URL (optional, for the gap check)")
+        country = middle.text_input("Country code", value="us", max_chars=2)
+        count = right.number_input("Competitors", min_value=2, max_value=5, value=5)
+        manual = st.text_area(
+            "Competitor URLs (optional, one per line)", height=90,
+            help="Leave empty to use live search results. Paste URLs to choose "
+                 "the competitors yourself or when live search is unavailable.")
+        submitted = st.form_submit_button("Analyse competitors", type="primary")
+    if submitted:
+        with st.spinner("Reading the ranking pages..."):
+            st.session_state["serp"] = reverse_engineer_serp_competitors(
+                keyword, my_url=my_url, max_competitors=int(count), country_code=country,
+                settings=settings, competitor_urls=manual.splitlines())
+    result = st.session_state.get("serp")
+    if not result:
+        st.info("Enter a keyword to analyse the pages that rank for it.")
+        return
+    serp_info = result["serp"]
+    if serp_info and serp_info["attempts"]:
+        st.caption("Search providers tried: " + "; ".join(
+            f"{a['provider']}: {a['outcome']}" for a in serp_info["attempts"]))
+    if not result["ok"]:
+        st.error(result["error"])
+        return
+
+    st.caption(f"Competitor source: {serp_info['provider']}")
+    if serp_info["ai_overview"]:
+        st.markdown("**AI answer overview for this query**")
+        st.info(serp_info["ai_overview"])
+    cols = st.columns(3)
+    cols[0].metric("Competitor average", f"{result['avg_competitor_words']} words")
+    cols[1].metric("Recommended length", f"{result['target_word_count']} words")
+    mine = result["my_page"]
+    if mine and mine["ok"]:
+        cols[2].metric("Your page", f"{mine['word_count']} words")
+    elif mine:
+        st.warning(f"Your page could not be read: {mine['error']}")
+
+    st.markdown("**Ranking pages**")
+    st.dataframe(pd.DataFrame(
+        [{"Rank": c["position"], "Title": c["title"], "Words": c["word_count"],
+          "H2": c["h2_count"], "H3": c["h3_count"],
+          "Schema": ", ".join(c["schema_types"]), "URL": c["url"],
+          "Note": c["error"]} for c in result["competitors"]]), hide_index=True)
+    for competitor in result["competitors"]:
+        if competitor["ok"] and competitor["heading_tree"]:
+            with st.expander(f"Heading tree: {competitor['title'] or competitor['url']}"):
+                st.markdown("\n".join(
+                    f"- {node['h2']}" + "".join(f"\n  - {h3}" for h3 in node["h3"])
+                    for node in competitor["heading_tree"]))
+
+    yes_no = {True: "Yes", False: "No", None: "n/a"}
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Entities competitors mention**")
+        st.dataframe(pd.DataFrame(
+            [{"Entity": e["entity"], "Competitors": e["competitors_using"],
+              "On your page": yes_no[e["in_my_page"]]} for e in result["entities"]]),
+            hide_index=True, height=320)
+    with right:
+        st.markdown("**Subtopics competitors cover**")
+        st.dataframe(pd.DataFrame(
+            [{"Subtopic": s["heading"], "Competitors": s["competitors_using"],
+              "On your page": yes_no[s["covered_by_my_page"]]} for s in result["subtopics"]]),
+            hide_index=True, height=320)
+
+    brief = result["brief"]
+    st.subheader("Content brief")
+    st.caption(f"Source: {brief['source']}. {brief['note']}")
+    markdown = brief_to_markdown(result)
+    st.download_button("Download brief (Markdown)", markdown,
+                       file_name=f"brief_{result['keyword'].replace(' ', '_')}.md",
+                       mime="text/markdown")
+    st.markdown(markdown.split("\n", 1)[1])
+
+
+def citation_monitor(settings: Settings) -> None:
+    st.subheader("AI citation visibility monitor")
+    with st.form("citation_form"):
+        left, right = st.columns(2)
+        brand = left.text_input("Brand name")
+        domain = right.text_input("Domain", placeholder="example.com")
+        prompts = st.text_area("Buyer prompts, one per line (up to 10)", height=110,
+                               placeholder="best standing desk for tall people\n"
+                                           "which standing desk brand is most reliable")
+        submitted = st.form_submit_button("Check visibility", type="primary")
+    if submitted:
+        with st.spinner("Asking each prompt..."):
+            st.session_state["citations"] = check_brand_ai_citation_visibility(
+                brand, domain, prompts, settings=settings)
+    result = st.session_state.get("citations")
+    if not result:
+        return
+    if not result["ok"]:
+        st.error(result["error"])
+        return
+    cols = st.columns(4)
+    cols[0].metric("Visibility", f"{result['visibility_percent']}%")
+    cols[1].metric("Prompts checked", result["prompts_checked"])
+    cols[2].metric("Brand mentions", result["mentions"])
+    cols[3].metric("Domain citations", result["citations"])
+    if result["mode_note"]:
+        st.warning(result["mode_note"])
+    yes_no = {True: "Yes", False: "No", None: "n/a"}
+    st.dataframe(pd.DataFrame(
+        [{"Prompt": r["prompt"], "Source": r["mode"],
+          "Brand mentioned": yes_no[r["brand_mentioned"]],
+          "Domain cited": yes_no[r["domain_cited"]],
+          "Top cited competitors": ", ".join(c["domain"] for c in r["competitor_urls"]),
+          "Answer excerpt": r["answer_excerpt"]} for r in result["results"]]),
+        hide_index=True)
+    if result["top_competitors"]:
+        st.markdown("**Most cited competitor domains**")
+        st.dataframe(pd.DataFrame(result["top_competitors"]), hide_index=True)
 
 
 def tab_search_performance() -> None:
@@ -406,9 +534,10 @@ def main() -> None:
     with tabs[1]:
         tab_keywords(settings)
     with tabs[2]:
-        coming(3, "Competitor gap analysis and content briefs")
+        tab_serp(settings)
     with tabs[3]:
         tab_geo(settings)
+        citation_monitor(settings)
     with tabs[4]:
         tab_search_performance()
     with tabs[5]:
