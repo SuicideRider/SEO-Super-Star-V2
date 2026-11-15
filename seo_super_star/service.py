@@ -93,8 +93,11 @@ def inspect_url_seo_and_geo(
     render_js: str = "auto",
     settings: Settings | None = None,
     save: bool = True,
+    save_full_report: bool = True,
 ) -> dict:
     """Full technical SEO + GEO audit of one URL. Returns a JSON-safe dict.
+
+    save_full_report=False stores only the summary row (used by batch runs).
 
     render_js: "auto" renders only thin pages, "always" forces it, "never" skips it.
     """
@@ -162,7 +165,7 @@ def inspect_url_seo_and_geo(
 
     if save:
         try:
-            report["saved_id"] = open_storage(settings).save_audit(report)
+            report["saved_id"] = open_storage(settings).save_audit(report, save_full_report)
         except Exception as exc:  # storage must never break an audit
             report["render_note"] = (report["render_note"] + f" History not saved: {exc}").strip()
     return report

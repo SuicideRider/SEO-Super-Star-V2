@@ -11,7 +11,9 @@ from urllib.parse import urljoin, urlparse
 from .config import Settings
 from .http import fetch_page, normalize_url
 
-MAX_BATCH = 100
+MAX_BATCH = 100            # interactive limit (dashboard and agent tools)
+MAX_SCHEDULED = 1000       # limit for the scheduled job, which has time to spare
+_MAX_SCAN = 5000           # URLs counted so "found" is the real size of the sitemap
 _MAX_SITEMAPS = 20          # child sitemaps read from one index
 _LOC = re.compile(r"<loc>\s*(?:<!\[CDATA\[)?\s*(.*?)\s*(?:\]\]>)?\s*</loc>", re.I | re.S)
 
@@ -83,16 +85,22 @@ def collect_sitemap_urls(sitemap_url: str, settings: Settings, limit: int = MAX_
 
 
 def spider_xml_sitemap(sitemap_url: str, max_urls: int = 25, target_keyword: str = "",
-                       settings: Settings | None = None, save: bool = True) -> dict:
-    """Audit up to `max_urls` pages listed in a sitemap. Returns a JSON-safe dict."""
+                       settings: Settings | None = None, save: bool = True,
+                       max_cap: int = MAX_BATCH) -> dict:
+    """Audit up to `max_urls` pages listed in a sitemap. Returns a JSON-safe dict.
+
+    max_urls is capped at max_cap. Each page is saved to history as a summary row.
+    """
     from .service import inspect_url_seo_and_geo          # avoids an import cycle
     from .storage import summary_row
 
     settings = settings or Settings.from_env()
-    max_urls = max(1, min(int(max_urls), MAX_BATCH))
-    found = collect_sitemap_urls(sitemap_url, settings, max_urls)
+    max_urls = max(1, min(int(max_urls), int(max_cap)))
+    found = collect_sitemap_urls(sitemap_url, settings, _MAX_SCAN)
+    urls_in_sitemap = len(found["urls"])
+    found["urls"] = found["urls"][:max_urls]
     out = {"sitemap_url": sitemap_url, "ok": False, "error": found["error"],
-           "sitemaps_read": found["sitemaps_read"], "urls_found": len(found["urls"]),
+           "sitemaps_read": found["sitemaps_read"], "urls_found": urls_in_sitemap,
            "pages": [], "failed": [], "summary": {}}
     if not found["urls"]:
         return out
@@ -100,7 +108,8 @@ def spider_xml_sitemap(sitemap_url: str, max_urls: int = 25, target_keyword: str
     def audit(url: str) -> dict:
         # Static HTML only: rendering and speed tests are too slow for a batch.
         return inspect_url_seo_and_geo(url, target_keyword=target_keyword, render_js="never",
-                                       run_pagespeed=False, settings=settings, save=save)
+                                       run_pagespeed=False, settings=settings, save=save,
+                                       save_full_report=False)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         reports = list(pool.map(audit, found["urls"]))

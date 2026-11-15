@@ -215,14 +215,16 @@ class Storage:
             conn.commit()
             return result
 
-    def save_audit(self, report: dict) -> int:
+    def save_audit(self, report: dict, keep_report: bool = True) -> int:
+        """Store an audit. keep_report=False stores the summary columns only,
+        which keeps large batch runs from filling a small free database."""
         row = summary_row(report)
         # The Markdown body is large and can be regenerated, so it is not stored.
         slim = json.loads(json.dumps(report))
         if slim.get("page"):
             slim["page"]["content"].pop("markdown", None)
             slim["page"]["content"].pop("text", None)
-        row["report_json"] = json.dumps(slim)
+        row["report_json"] = json.dumps(slim) if keep_report else None
         columns = list(row)
         sql = (f"INSERT INTO url_audits ({', '.join(columns)}) "
                f"VALUES ({', '.join('?' for _ in columns)})")
@@ -236,7 +238,7 @@ class Storage:
     def get_audit(self, audit_id: int) -> dict | None:
         rows = self._run("SELECT report_json FROM url_audits WHERE id = ?",
                          (int(audit_id),), fetch=True)
-        return json.loads(rows[0]["report_json"]) if rows else None
+        return json.loads(rows[0]["report_json"]) if rows and rows[0]["report_json"] else None
 
     # --- keyword clusters -------------------------------------------------
 

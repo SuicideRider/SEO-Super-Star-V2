@@ -48,7 +48,9 @@ def run_daily(config_path: str, settings: Settings, output_dir: str = "reports")
     keyword = config.get("target_keyword", "")
     if config.get("sitemap"):
         result = sitemap.spider_xml_sitemap(config["sitemap"], int(config.get("max_urls", 25)),
-                                            keyword, settings)
+                                            keyword, settings,
+                                            max_cap=sitemap.MAX_SCHEDULED)
+        out["urls_in_sitemap"] = result["urls_found"]
         rows += result["pages"]
         failed += result["failed"]
         if not result["ok"]:
@@ -136,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
             args.url, target_keyword=args.keyword, schema_type=args.schema_type,
             run_pagespeed=args.pagespeed, render_js=args.render_js, settings=settings)
     elif args.command == "sitemap":
-        result = sitemap.spider_xml_sitemap(args.sitemap_url, args.max_urls, args.keyword, settings)
+        result = sitemap.spider_xml_sitemap(args.sitemap_url, args.max_urls, args.keyword, settings,
+                                            max_cap=sitemap.MAX_SCHEDULED)
     elif args.command == "keywords":
         result = keywords.discover_keywords_and_trends(args.seed, country_code=args.country,
                                                        settings=settings)
